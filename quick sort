@@ -38,3 +38,70 @@ int main() {
     printArr(arr, size);
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+#include <stdio.h>
+
+struct student {
+    int roll_no;
+    float marks;
+};
+
+void swap(struct student *a, struct student *b) {
+    struct student temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+int partition(struct student arr[], int low, int high) {
+    float pivot = arr[high].marks;
+    int i = low - 1;
+    
+    for (int j = low; j < high; j++) {
+        if (arr[j].marks <= pivot) {
+            i++;
+            swap(&arr[i], &arr[j]);
+        }
+    }
+    swap(&arr[i + 1], &arr[high]);
+    return i + 1;
+}
+
+void quickSort(struct student arr[], int low, int high) {
+    if (low < high) {
+        int pi = partition(arr, low, high);
+        quickSort(arr, low, pi - 1);
+        quickSort(arr, pi + 1, high);
+    }
+}
+
+int main() {
+    int n;
+    printf("Enter number of students: ");
+    scanf("%d", &n);
+    
+    struct student arr[n];
+    
+    for (int i = 0; i < n; i++) {
+        printf("Enter roll number and marks for student %d: ", i + 1);
+        scanf("%d %f", &arr[i].roll_no, &arr[i].marks);
+    }
+    
+    quickSort(arr, 0, n - 1);
+    
+    printf("Sorted list of students based on marks:\n");
+    for (int i = 0; i < n; i++) {
+        printf("Roll Number: %d, Marks: %.2f\n", arr[i].roll_no, arr[i].marks);
+    }
+    
+    return 0;
+}
