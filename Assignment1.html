@@ -1,1 +1,231 @@
-https://drive.google.com/file/d/1cSsGh9BqPk0TeivjYVGtsDg5mIUs0G-G/view?usp=sharing
+<?php
+// notify.php
+
+header('Content-Type: application/json');
+
+require_once __DIR__ . '/db_connect.php';
+
+/*
+|--------------------------------------------------------------------------
+| WhatsApp Cloud API Credentials
+|--------------------------------------------------------------------------
+*/
+$ACCESS_TOKEN = 'EAAZBkAuEOC68BRw4n1yzZCZCYrqNbjgZAENqBBjnKZAsWvVrDehGQkjVnZCDbeqLPsCZChMuXb75xVoXG9A4rbZCTfFo9GbZCqZB9xIVxy8MjNbGvYgks1q0YXOySZAIpqWoe5ifDQJnNYOrGC0NsUo5FNMQbDyJPEn5F8he1Alyb4rdTkvFJJjwJBZAhgXmZCkxuT84lvsJ1yjJwehbr4SetUKF74AtYOQfVxeMV5KADMf2FY9kWccZCvhdAUnAiRXHW5mnq5lQCgqspsVmMlPlTs8sfsuQZDZD';
+$PHONE_NUMBER_ID = '1152492874619946';
+
+/*
+|--------------------------------------------------------------------------
+| Allow POST Only
+|--------------------------------------------------------------------------
+*/
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Method Not Allowed'
+    ]);
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Read JSON Input
+|--------------------------------------------------------------------------
+*/
+$input = file_get_contents('php://input');
+$data = json_decode($input, true);
+
+$sendTemplate = isset($data['send_template']) && $data['send_template'] === true;
+
+if (
+    !isset($data['student_ids']) ||
+    !is_array($data['student_ids']) ||
+    empty($data['student_ids'])
+) {
+    http_response_code(400);
+    echo json_encode([
+        'success' => false,
+        'error' => 'No students selected'
+    ]);
+    exit;
+}
+
+$studentIds = array_map('intval', $data['student_ids']);
+
+try {
+
+    $fetchStmt = $pdo->prepare("
+        SELECT id, name, adm_no, class_sec, total_amount, mobile_number
+        FROM students
+        WHERE id = ?
+    ");
+
+    $logStmt = $pdo->prepare("
+        INSERT INTO notifications (student_id, student_name, student_mobile)
+        VALUES (?, ?, ?)
+    ");
+
+    $sentCount = 0;
+    $failedCount = 0;
+    $errors = [];
+
+    foreach ($studentIds as $studentId) {
+
+        $fetchStmt->execute([$studentId]);
+        $student = $fetchStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$student) {
+            $failedCount++;
+            continue;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Clean Mobile Number
+        |--------------------------------------------------------------------------
+        */
+        $mobile = preg_replace('/[^0-9]/', '', $student['mobile_number']);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Message
+        |--------------------------------------------------------------------------
+        */
+        $message = "Dear Parent,\n\n"
+                 . "Student: {$student['name']}\n"
+                 . "Admission No: {$student['adm_no']}\n"
+                 . "Class: {$student['class_sec']}\n"
+                 . "Outstanding Fee: ₹" . number_format($student['total_amount'], 2) . "\n\n"
+                 . "Please clear the dues.\n\n"
+                 . "Regards,\nSchool Administration";
+
+        /*
+        |--------------------------------------------------------------------------
+        | WhatsApp Payload
+        |--------------------------------------------------------------------------
+        */
+        if ($sendTemplate) {
+            $payload = [
+                "messaging_product" => "whatsapp",
+                "to" => $mobile,
+                "type" => "template",
+                "template" => [
+                    "name" => "hello_world",
+                    "language" => [
+                        "code" => "en_US"
+                    ]
+                ]
+            ];
+        } else {
+            $payload = [
+                "messaging_product" => "whatsapp",
+                "to" => $mobile,
+                "type" => "text",
+                "text" => [
+                    "body" => $message
+                ]
+            ];
+        }
+
+        $url = "https://graph.facebook.com/v23.0/"
+             . $PHONE_NUMBER_ID
+             . "/messages";
+
+        $ch = curl_init();
+
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($payload),
+            CURLOPT_HTTPHEADER => [
+                "Authorization: Bearer " . $ACCESS_TOKEN,
+                "Content-Type: application/json"
+            ]
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+
+        curl_close($ch);
+
+        if ($curlError) {
+
+            $failedCount++;
+
+            $errors[] = [
+                'student_id' => $studentId,
+                'error' => $curlError
+            ];
+
+            continue;
+        }
+
+        $responseData = json_decode($response, true);
+
+        if ($httpCode >= 200 && $httpCode < 300) {
+
+            $sentCount++;
+            
+            // Log successful notification to the notifications table
+            $logStmt->execute([
+                $student['id'],
+                $student['name'],
+                $student['mobile_number']
+            ]);
+
+        } else {
+
+            $failedCount++;
+
+            $errors[] = [
+                'student_id' => $studentId,
+                'response' => $responseData
+            ];
+        }
+    }
+
+    if ($sentCount === 0 && $failedCount > 0) {
+        $errorMsg = 'Failed to send WhatsApp message.';
+        if (!empty($errors)) {
+            $firstError = $errors[0];
+            if (isset($firstError['error'])) {
+                $errorMsg .= ' Connection error: ' . $firstError['error'];
+            } elseif (isset($firstError['response']['error']['message'])) {
+                $errorMsg .= ' Meta API Error: ' . $firstError['response']['error']['message'];
+            }
+        }
+        
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => $errorMsg,
+            'errors' => $errors
+        ]);
+        exit;
+    }
+
+    $messageText = "$sentCount WhatsApp message(s) sent successfully.";
+    if ($failedCount > 0) {
+        $messageText .= " ($failedCount failed. Check API configuration/recipient list)";
+    }
+
+    echo json_encode([
+        'success' => true,
+        'message' => $messageText,
+        'sent_count' => $sentCount,
+        'notified_count' => $sentCount,
+        'failed_count' => $failedCount,
+        'errors' => $errors
+    ]);
+
+} catch (Exception $e) {
+
+    http_response_code(500);
+
+    echo json_encode([
+        'success' => false,
+        'error' => $e->getMessage()
+    ]);
+}
